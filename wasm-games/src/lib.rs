@@ -429,18 +429,35 @@ pub fn main_with_container(container: Element) {
         .unwrap();
     body.append_child(&canvas).expect("Append canvas to body");
 
-    // Style the canvas
-    canvas.style().set_property("position", "fixed").unwrap();
+    canvas.style().set_property("position", "absolute").unwrap();
     canvas.style().set_property("top", "0").unwrap();
     canvas.style().set_property("left", "0").unwrap();
-    canvas.style().set_property("width", "100vw").unwrap();
-    canvas.style().set_property("height", "100vh").unwrap();
+    canvas.style().set_property("width", "100%").unwrap();
+    canvas.style().set_property("height", "100%").unwrap();
     canvas.style().set_property("z-index", "1").unwrap();
+    canvas.style().set_property("display", "block").unwrap();
+    canvas.style().set_property("touch-action", "none").unwrap();
+    canvas
+        .style()
+        .set_property("-webkit-user-select", "none")
+        .unwrap();
+    canvas
+        .style()
+        .set_property("-moz-user-select", "none")
+        .unwrap();
+    canvas
+        .style()
+        .set_property("-ms-user-select", "none")
+        .unwrap();
+    canvas.style().set_property("user-select", "none").unwrap();
+    canvas.focus().unwrap(); // Give the canvas focus
 
-    // Remove body margins and padding
     body.style().set_property("margin", "0").unwrap();
     body.style().set_property("padding", "0").unwrap();
     body.style().set_property("overflow", "hidden").unwrap();
+    body.style().set_property("position", "fixed").unwrap();
+    body.style().set_property("width", "100%").unwrap();
+    body.style().set_property("height", "100%").unwrap();
 
     let webgl2_context = canvas
         .get_context("webgl2")
@@ -581,16 +598,13 @@ pub fn main_with_container(container: Element) {
                         let game_y = 1.0 - (touch_y / game_state.window_height) * 2.0;
                         match touch.phase {
                             TouchPhase::Started => {
-                                if game_state.touch_id.is_none() {
-                                    game_state.touch_id = Some(touch.id);
-                                    let dx = game_x - game_state.cannon_x;
-                                    let dy = game_y - game_state.cannon_y;
-                                    game_state.theta = dx.atan2(dy).clamp(
-                                        -std::f32::consts::PI / 2.0,
-                                        std::f32::consts::PI / 2.0,
-                                    );
-                                    game_state.fire_pressed = true;
-                                }
+                                game_state.touch_id = Some(touch.id);
+                                let dx = game_x - game_state.cannon_x;
+                                let dy = game_y - game_state.cannon_y;
+                                game_state.theta = dx
+                                    .atan2(dy)
+                                    .clamp(-std::f32::consts::PI / 2.0, std::f32::consts::PI / 2.0);
+                                game_state.fire_pressed = true; // Start firing immediately
                             }
                             TouchPhase::Moved => {
                                 if game_state.touch_id == Some(touch.id) {
@@ -600,6 +614,7 @@ pub fn main_with_container(container: Element) {
                                         -std::f32::consts::PI / 2.0,
                                         std::f32::consts::PI / 2.0,
                                     );
+                                    game_state.fire_pressed = true; // Continue firing while moving
                                 }
                             }
                             TouchPhase::Ended | TouchPhase::Cancelled => {
