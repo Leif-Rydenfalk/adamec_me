@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::panic;
 use wasm_bindgen::prelude::*;
 use web_sys::Element;
-use winit::event::{ElementState, Event, VirtualKeyCode, WindowEvent};
+use winit::event::{ElementState, Event, TouchPhase, VirtualKeyCode, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::platform::web::WindowExtWebSys;
 use winit::window::WindowBuilder;
@@ -36,7 +36,7 @@ const BALL_COLOR: [f32; 4] = [0.0, 1.0, 0.0, 1.0]; // Green bullets
 
 // ### Structures
 
-// Brick structure with fields for position, health, color, and hit effects
+/// Represents a brick with position, health, color, and hit effect timer.
 struct Brick {
     left: f32,
     bottom: f32,
@@ -47,7 +47,7 @@ struct Brick {
     hit_timer: f32,       // Timer for hit effect
 }
 
-// Bullet structure
+/// Represents a bullet fired from the cannon.
 struct Bullet {
     x: f32,
     y: f32,
@@ -57,7 +57,7 @@ struct Bullet {
     health: u32,
 }
 
-// Particle structure for visual effects
+/// Represents a particle for visual effects.
 struct Particle {
     x: f32,
     y: f32,
@@ -67,7 +67,7 @@ struct Particle {
     color: [f32; 4],
 }
 
-// HashGrid structure for efficient collision detection
+/// HashGrid for efficient collision detection.
 struct HashGrid {
     cell_width: f32,
     cell_height: f32,
@@ -127,6 +127,7 @@ trait Weapon {
     fn try_fire(&mut self, cannon_position: (f32, f32), cannon_angle: f32) -> Option<Bullet>;
 }
 
+/// Simple cannon implementation with cooldown and firing variation.
 struct SimpleCannon {
     cooldown_timer: f32,
     cooldown_min: f32,
@@ -202,6 +203,10 @@ struct GameState {
     fire_pressed: bool,
     weapon: SimpleCannon,
     hash_grid: HashGrid,
+    window_width: f32,
+    window_height: f32,
+    touch_id: Option<u64>,
+    score: u32,
 }
 
 impl GameState {
@@ -220,7 +225,7 @@ impl GameState {
                 let offset_y = (Math::random() as f32 * 2.0 - 1.0) * MAX_OFFSET;
                 let x = starting_x + (j as f32) * (BRICK_WIDTH + BRICK_SPACING) + offset_x;
                 let y = starting_y + (i as f32) * (BRICK_HEIGHT + BRICK_SPACING) + offset_y;
-                let hue = ((x + 1.0) / 2.0) * 360.0; // Map x from [-1,1] to [0,360]
+                let hue = ((x + 1.0) / 2.0) * 360.0;
                 let color = hsv_to_rgb(hue, 0.7, 1.0);
                 bricks.push(Brick {
                     left: x,
@@ -254,16 +259,22 @@ impl GameState {
             fire_pressed: false,
             weapon: SimpleCannon::new(),
             hash_grid,
+            window_width: 0.0,
+            window_height: 0.0,
+            touch_id: None,
+            score: 0,
         }
     }
 
     fn update(&mut self, delta_time: f32) {
-        // Update cannon rotation
-        if self.left_pressed {
-            self.theta += ROTATION_SPEED * delta_time;
-        }
-        if self.right_pressed {
-            self.theta -= ROTATION_SPEED * delta_time;
+        // Handle cannon rotation via keyboard
+        if self.touch_id.is_none() {
+            if self.left_pressed {
+                self.theta += ROTATION_SPEED * delta_time;
+            }
+            if self.right_pressed {
+                self.theta -= ROTATION_SPEED * delta_time;
+            }
         }
         self.theta = self
             .theta
@@ -279,13 +290,12 @@ impl GameState {
                 self.bullets.push(bullet);
                 let tip_x = self.cannon_x + CANNON_LENGTH * self.theta.sin();
                 let tip_y = self.cannon_y + CANNON_LENGTH * self.theta.cos();
-                self.spawn_particles(tip_x, tip_y, 5, [1.0, 0.5, 0.0, 1.0]); // Orange muzzle flash
+                self.spawn_particles(-tip_x, tip_y, 5, [1.0, 0.5, 0.0, 1.0]);
             }
         }
 
+        // Update bullets and handle collisions
         let mut to_spawn = Vec::new();
-
-        // Update bullets and check collisions
         for bullet in &mut self.bullets {
             let friction_factor = FRICTION.powf(delta_time);
             bullet.dx *= friction_factor;
@@ -294,6 +304,7 @@ impl GameState {
             bullet.x += bullet.dx * delta_time;
             bullet.y += bullet.dy * delta_time;
 
+            // Bounce off walls
             if bullet.x - bullet.radius < -1.0 {
                 bullet.x = -1.0 + bullet.radius;
                 bullet.dx = -bullet.dx;
@@ -339,6 +350,11 @@ impl GameState {
                     brick.hit_timer = HIT_EFFECT_DURATION;
                     to_spawn.push((bullet.x, bullet.y, 3, brick.base_color));
                     if brick.health == 0 {
+                        self.score += 1;
+                        let document = web_sys::window().unwrap().document().unwrap();
+                        if let Some(score_element) = document.get_element_by_id("score") {
+                            score_element.set_inner_html(&format!("Score: {}", self.score));
+                        }
                         let brick_center_x = (brick.left + brick.right) / 2.0;
                         let brick_center_y = (brick.bottom + brick.top) / 2.0;
                         to_spawn.push((brick_center_x, brick_center_y, 10, brick.base_color));
@@ -347,10 +363,12 @@ impl GameState {
             }
         }
 
+        // Spawn particles from collisions
         for spawn in to_spawn {
             self.spawn_particles(spawn.0, spawn.1, spawn.2, spawn.3);
         }
 
+        // Remove dead bullets
         self.bullets
             .retain(|bullet| bullet.health > 0 && bullet.y - bullet.radius >= -1.0);
 
@@ -392,31 +410,7 @@ impl GameState {
     }
 }
 
-// ### Utility Functions
-
-// Convert HSV to RGB for brick colors
-fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [f32; 3] {
-    let c = v * s;
-    let h_prime = (h % 360.0) / 60.0;
-    let x = c * (1.0 - (h_prime % 2.0 - 1.0).abs());
-    let (r1, g1, b1) = if h_prime < 1.0 {
-        (c, x, 0.0)
-    } else if h_prime < 2.0 {
-        (x, c, 0.0)
-    } else if h_prime < 3.0 {
-        (0.0, c, x)
-    } else if h_prime < 4.0 {
-        (0.0, x, c)
-    } else if h_prime < 5.0 {
-        (x, 0.0, c)
-    } else {
-        (c, 0.0, x)
-    };
-    let m = v - c;
-    [r1 + m, g1 + m, b1 + m]
-}
-
-// ### Main Rendering Function
+// ### Main Function
 
 pub fn main_with_container(container: Element) {
     let event_loop = EventLoop::new();
@@ -425,9 +419,28 @@ pub fn main_with_container(container: Element) {
         .build(&event_loop)
         .unwrap();
     let canvas = window.canvas();
-    container
-        .append_child(&canvas)
-        .expect("Append canvas to container");
+
+    // Append canvas to the body
+    let body = web_sys::window()
+        .unwrap()
+        .document()
+        .unwrap()
+        .body()
+        .unwrap();
+    body.append_child(&canvas).expect("Append canvas to body");
+
+    // Style the canvas
+    canvas.style().set_property("position", "fixed").unwrap();
+    canvas.style().set_property("top", "0").unwrap();
+    canvas.style().set_property("left", "0").unwrap();
+    canvas.style().set_property("width", "100vw").unwrap();
+    canvas.style().set_property("height", "100vh").unwrap();
+    canvas.style().set_property("z-index", "1").unwrap();
+
+    // Remove body margins and padding
+    body.style().set_property("margin", "0").unwrap();
+    body.style().set_property("padding", "0").unwrap();
+    body.style().set_property("overflow", "hidden").unwrap();
 
     let webgl2_context = canvas
         .get_context("webgl2")
@@ -437,12 +450,20 @@ pub fn main_with_container(container: Element) {
         .unwrap();
     let gl = glow::Context::from_webgl2_context(webgl2_context);
 
-    // Enable blending for particle transparency
+    // Set initial canvas size
+    let window_web = web_sys::window().unwrap();
+    let initial_width = window_web.inner_width().unwrap().as_f64().unwrap() as u32;
+    let initial_height = window_web.inner_height().unwrap().as_f64().unwrap() as u32;
+    canvas.set_width(initial_width);
+    canvas.set_height(initial_height);
+
     unsafe {
         gl.enable(glow::BLEND);
         gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+        gl.viewport(0, 0, initial_width as i32, initial_height as i32);
     }
 
+    // Create shader program
     let program = unsafe {
         let vertex_array = gl
             .create_vertex_array()
@@ -452,16 +473,28 @@ pub fn main_with_container(container: Element) {
         let program = gl.create_program().expect("Cannot create program");
         let vertex_shader_source = "#version 300 es\n
         in vec2 position;\n
+        out vec2 v_position;\n
         uniform mat4 model;\n
         void main() {\n
             gl_Position = model * vec4(position, 0.0, 1.0);\n
+            v_position = position;\n
         }\n";
         let fragment_shader_source = "#version 300 es\n
         precision mediump float;\n
+        in vec2 v_position;\n
         uniform vec4 color;\n
+        uniform bool is_background;\n
         out vec4 fragColor;\n
         void main() {\n
-            fragColor = color;\n
+            if (is_background) {\n
+                float t = (v_position.y + 1.0) / 2.0;\n
+                vec3 top_color = vec3(0.5, 0.7, 1.0);\n
+                vec3 bottom_color = vec3(0.2, 0.3, 0.5);\n
+                vec3 grad_color = mix(bottom_color, top_color, t);\n
+                fragColor = vec4(grad_color, 1.0);\n
+            } else {\n
+                fragColor = color;\n
+            }\n
         }\n";
 
         let shader_sources = [
@@ -499,7 +532,27 @@ pub fn main_with_container(container: Element) {
     let pos_attrib = unsafe { gl.get_attrib_location(program, "position").unwrap() };
     let color_location = unsafe { gl.get_uniform_location(program, "color").unwrap() };
     let model_location = unsafe { gl.get_uniform_location(program, "model").unwrap() };
+    let is_background_location =
+        unsafe { gl.get_uniform_location(program, "is_background").unwrap() };
+
+    // Create score UI
+    let document = web_sys::window().unwrap().document().unwrap();
+    let score_element = document.create_element("div").unwrap();
+    score_element.set_id("score");
+    score_element.set_inner_html("Score: 0");
+    body.append_child(&score_element)
+        .expect("Append score element");
+
+    score_element.set_attribute("position", "absolute").unwrap();
+    score_element.set_attribute("top", "10px").unwrap();
+    score_element.set_attribute("left", "10px").unwrap();
+    score_element.set_attribute("color", "white").unwrap();
+    score_element.set_attribute("font-size", "24px").unwrap();
+    score_element.set_attribute("z-index", "2").unwrap();
+
     let mut game_state = GameState::new();
+    game_state.window_width = initial_width as f32;
+    game_state.window_height = initial_height as f32;
     let mut last_time = Date::now();
 
     event_loop.run(move |event, _, control_flow| {
@@ -508,6 +561,56 @@ pub fn main_with_container(container: Element) {
         match event {
             Event::WindowEvent { event, .. } => match event {
                 WindowEvent::CloseRequested => *control_flow = ControlFlow::Exit,
+                WindowEvent::Resized(physical_size) => {
+                    let width = physical_size.width;
+                    let height = physical_size.height;
+                    canvas.set_width(width);
+                    canvas.set_height(height);
+                    unsafe {
+                        gl.viewport(0, 0, width as i32, height as i32);
+                    }
+                    game_state.window_width = width as f32;
+                    game_state.window_height = height as f32;
+                }
+                WindowEvent::Touch(touch) => {
+                    let logical_position = touch.location;
+                    let touch_x = logical_position.x as f32;
+                    let touch_y = logical_position.y as f32;
+                    if game_state.window_width > 0.0 && game_state.window_height > 0.0 {
+                        let game_x = (touch_x / game_state.window_width) * 2.0 - 1.0;
+                        let game_y = 1.0 - (touch_y / game_state.window_height) * 2.0;
+                        match touch.phase {
+                            TouchPhase::Started => {
+                                if game_state.touch_id.is_none() {
+                                    game_state.touch_id = Some(touch.id);
+                                    let dx = game_x - game_state.cannon_x;
+                                    let dy = game_y - game_state.cannon_y;
+                                    game_state.theta = dx.atan2(dy).clamp(
+                                        -std::f32::consts::PI / 2.0,
+                                        std::f32::consts::PI / 2.0,
+                                    );
+                                    game_state.fire_pressed = true;
+                                }
+                            }
+                            TouchPhase::Moved => {
+                                if game_state.touch_id == Some(touch.id) {
+                                    let dx = game_x - game_state.cannon_x;
+                                    let dy = game_y - game_state.cannon_y;
+                                    game_state.theta = dx.atan2(dy).clamp(
+                                        -std::f32::consts::PI / 2.0,
+                                        std::f32::consts::PI / 2.0,
+                                    );
+                                }
+                            }
+                            TouchPhase::Ended | TouchPhase::Cancelled => {
+                                if game_state.touch_id == Some(touch.id) {
+                                    game_state.fire_pressed = false;
+                                    game_state.touch_id = None;
+                                }
+                            }
+                        }
+                    }
+                }
                 WindowEvent::KeyboardInput { input, .. } => {
                     if let Some(keycode) = input.virtual_keycode {
                         match keycode {
@@ -538,11 +641,12 @@ pub fn main_with_container(container: Element) {
                 gl.clear(glow::COLOR_BUFFER_BIT);
                 gl.use_program(Some(program));
 
-                // Draw background
+                // Draw gradient background
                 let model_matrix = [
                     1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
                 ];
                 gl.uniform_matrix_4_f32_slice(Some(&model_location), false, &model_matrix);
+                gl.uniform_1_i32(Some(&is_background_location), 1);
                 draw_rectangle(
                     &gl,
                     pos_attrib,
@@ -551,8 +655,9 @@ pub fn main_with_container(container: Element) {
                     -1.0,
                     1.0,
                     1.0,
-                    [0.2, 0.3, 0.5, 1.0], // Light blue-ish background
+                    [0.0, 0.0, 0.0, 0.0], // Color ignored for background
                 );
+                gl.uniform_1_i32(Some(&is_background_location), 0);
 
                 // Draw ground
                 draw_ground(&gl, pos_attrib, &color_location);
@@ -562,7 +667,7 @@ pub fn main_with_container(container: Element) {
                     if brick.health > 0 {
                         let health_factor = brick.health as f32 / 5.0;
                         let color = if brick.hit_timer > 0.0 {
-                            [1.0, 1.0, 1.0, 1.0] // White flash
+                            [1.0, 1.0, 1.0, 1.0] // White flash on hit
                         } else {
                             [
                                 brick.base_color[0] * health_factor,
@@ -586,7 +691,7 @@ pub fn main_with_container(container: Element) {
                     }
                 }
 
-                // Draw cannon base
+                // Draw cannon base with supports
                 let model_matrix =
                     create_translation_matrix(game_state.cannon_x, game_state.cannon_y);
                 gl.uniform_matrix_4_f32_slice(Some(&model_location), false, &model_matrix);
@@ -599,6 +704,28 @@ pub fn main_with_container(container: Element) {
                     BASE_WIDTH / 2.0,
                     BASE_HEIGHT / 2.0,
                     BASE_COLOR,
+                );
+                // Left support
+                draw_rectangle(
+                    &gl,
+                    pos_attrib,
+                    &color_location,
+                    -BASE_WIDTH / 2.0 - 0.01,
+                    -BASE_HEIGHT / 2.0,
+                    -BASE_WIDTH / 2.0,
+                    BASE_HEIGHT / 2.0,
+                    [0.3, 0.3, 0.3, 1.0],
+                );
+                // Right support
+                draw_rectangle(
+                    &gl,
+                    pos_attrib,
+                    &color_location,
+                    BASE_WIDTH / 2.0,
+                    -BASE_HEIGHT / 2.0,
+                    BASE_WIDTH / 2.0 + 0.01,
+                    BASE_HEIGHT / 2.0,
+                    [0.3, 0.3, 0.3, 1.0],
                 );
 
                 // Draw cannon barrel
@@ -620,15 +747,15 @@ pub fn main_with_container(container: Element) {
                 for bullet in &game_state.bullets {
                     let model_matrix = create_translation_matrix(bullet.x, bullet.y);
                     gl.uniform_matrix_4_f32_slice(Some(&model_location), false, &model_matrix);
-                    draw_rectangle(
+                    draw_circle(
                         &gl,
                         pos_attrib,
                         &color_location,
-                        -bullet.radius,
-                        -bullet.radius,
-                        bullet.radius,
+                        0.0,
+                        0.0,
                         bullet.radius,
                         BALL_COLOR,
+                        16,
                     );
                 }
 
@@ -643,16 +770,7 @@ pub fn main_with_container(container: Element) {
                     ];
                     let model_matrix = create_translation_matrix(particle.x, particle.y);
                     gl.uniform_matrix_4_f32_slice(Some(&model_location), false, &model_matrix);
-                    draw_rectangle(
-                        &gl,
-                        pos_attrib,
-                        &color_location,
-                        -0.005,
-                        -0.005,
-                        0.005,
-                        0.005,
-                        color,
-                    );
+                    draw_circle(&gl, pos_attrib, &color_location, 0.0, 0.0, 0.005, color, 8);
                 }
             },
             _ => {}
@@ -660,7 +778,31 @@ pub fn main_with_container(container: Element) {
     });
 }
 
-// ### Helper Functions
+// ### Utility Functions
+
+/// Convert HSV to RGB for brick colors.
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [f32; 3] {
+    let c = v * s;
+    let h_prime = (h % 360.0) / 60.0;
+    let x = c * (1.0 - (h_prime % 2.0 - 1.0).abs());
+    let (r1, g1, b1) = if h_prime < 1.0 {
+        (c, x, 0.0)
+    } else if h_prime < 2.0 {
+        (x, c, 0.0)
+    } else if h_prime < 3.0 {
+        (0.0, c, x)
+    } else if h_prime < 4.0 {
+        (0.0, x, c)
+    } else if h_prime < 5.0 {
+        (x, 0.0, c)
+    } else {
+        (c, 0.0, x)
+    };
+    let m = v - c;
+    [r1 + m, g1 + m, b1 + m]
+}
+
+// ### Drawing Functions
 
 fn draw_rectangle(
     gl: &glow::Context,
@@ -702,6 +844,73 @@ fn draw_rectangle(
         gl.enable_vertex_attrib_array(pos_attrib);
         gl.uniform_4_f32(Some(color_location), color[0], color[1], color[2], color[3]);
         gl.draw_elements(glow::TRIANGLES, 6, glow::UNSIGNED_INT, 0);
+
+        gl.delete_buffer(vbo);
+        gl.delete_buffer(ibo);
+    }
+}
+
+fn draw_circle(
+    gl: &glow::Context,
+    pos_attrib: u32,
+    color_location: &glow::UniformLocation,
+    cx: f32,
+    cy: f32,
+    radius: f32,
+    color: [f32; 4],
+    segments: u32,
+) {
+    let mut vertices = Vec::new();
+    vertices.push(cx); // Center
+    vertices.push(cy);
+    for i in 0..=segments {
+        let angle = 2.0 * std::f32::consts::PI * (i as f32) / (segments as f32);
+        let x = cx + radius * angle.cos();
+        let y = cy + radius * angle.sin();
+        vertices.push(x);
+        vertices.push(y);
+    }
+
+    let indices: Vec<u32> = (1..=segments).collect();
+    let indices = [0u32]
+        .iter()
+        .chain(&indices)
+        .chain(&[1])
+        .cloned()
+        .collect::<Vec<u32>>();
+
+    unsafe {
+        let vbo = gl.create_buffer().expect("Cannot create vertex buffer");
+        gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
+        gl.buffer_data_u8_slice(
+            glow::ARRAY_BUFFER,
+            &vertices
+                .iter()
+                .flat_map(|f| f.to_ne_bytes())
+                .collect::<Vec<u8>>(),
+            glow::STATIC_DRAW,
+        );
+
+        let ibo = gl.create_buffer().expect("Cannot create index buffer");
+        gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(ibo));
+        gl.buffer_data_u8_slice(
+            glow::ELEMENT_ARRAY_BUFFER,
+            &indices
+                .iter()
+                .flat_map(|i| i.to_ne_bytes())
+                .collect::<Vec<u8>>(),
+            glow::STATIC_DRAW,
+        );
+
+        gl.vertex_attrib_pointer_f32(pos_attrib, 2, glow::FLOAT, false, 0, 0);
+        gl.enable_vertex_attrib_array(pos_attrib);
+        gl.uniform_4_f32(Some(color_location), color[0], color[1], color[2], color[3]);
+        gl.draw_elements(
+            glow::TRIANGLE_FAN,
+            indices.len() as i32,
+            glow::UNSIGNED_INT,
+            0,
+        );
 
         gl.delete_buffer(vbo);
         gl.delete_buffer(ibo);
