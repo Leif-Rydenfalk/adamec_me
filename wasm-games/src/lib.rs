@@ -9,7 +9,21 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::platform::web::WindowExtWebSys;
 use winit::window::WindowBuilder;
 
-pub fn main() {
+// Initialize function that accepts a container element from JS/Svelte
+#[wasm_bindgen]
+pub fn initialize(container: web_sys::Element) {
+    // Don't initialize the logger again if it's already been initialized in run()
+    // We can use a more defensive approach that doesn't panic on failure
+    let _ = console_log::init_with_level(log::Level::Debug);
+
+    std::panic::set_hook(Box::new(|info| {
+        log::error!("Panicked: {}", info);
+    }));
+
+    main_with_container(container);
+}
+
+pub fn main_with_container(container: web_sys::Element) {
     // Winit setup
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
@@ -17,19 +31,30 @@ pub fn main() {
         .build(&event_loop)
         .unwrap();
     let canvas = window.canvas();
-    let window = web_sys::window().unwrap();
-    let document = window.document().unwrap();
-    let body = document.body().unwrap();
-    body.append_child(&canvas)
-        .expect("Append canvas to HTML body");
+
+    // Append canvas to the provided container instead of the body
+    container
+        .append_child(&canvas)
+        .expect("Append canvas to container");
 
     // Glow setup
-    let webgl2_context = canvas
-        .get_context("webgl2")
-        .unwrap()
-        .unwrap()
-        .dyn_into::<web_sys::WebGl2RenderingContext>()
-        .unwrap();
+    let webgl2_context = match canvas.get_context("webgl2") {
+        Ok(Some(context)) => match context.dyn_into::<web_sys::WebGl2RenderingContext>() {
+            Ok(ctx) => ctx,
+            Err(e) => {
+                log::error!("Failed to convert to WebGL2 context: {:?}", e);
+                panic!("WebGL2 context conversion failed");
+            }
+        },
+        Ok(None) => {
+            log::error!("WebGL2 not supported by this browser");
+            panic!("WebGL2 not supported");
+        }
+        Err(e) => {
+            log::error!("Error getting WebGL2 context: {:?}", e);
+            panic!("WebGL2 context error");
+        }
+    };
     let gl = glow::Context::from_webgl2_context(webgl2_context);
     unsafe {
         let vertex_array = gl
@@ -97,8 +122,6 @@ pub fn main() {
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
 
-        //log::debug!("{:?}", event);
-
         match event {
             Event::WindowEvent { event, .. } => match event {
                 WindowEvent::CloseRequested => {
@@ -111,10 +134,7 @@ pub fn main() {
                             if http_resp.is_none() {
                                 let (tx, rx) = oneshot::channel::<String>();
                                 http_resp = Some(rx);
-                                start_http_call(
-                                    "http://0.0.0.0:8000/black_humor.txt".to_string(),
-                                    tx,
-                                );
+                                start_http_call("/black_humor.txt".to_string(), tx);
                             } else {
                                 log::error!(
                                     "Haven't read the previously made request yet; press R first"
@@ -122,19 +142,25 @@ pub fn main() {
                             }
                         } else if input.virtual_keycode == Some(winit::event::VirtualKeyCode::R) {
                             if let Some(mut channel) = http_resp.take() {
-                                if let Some(resp) = channel.try_recv().unwrap() {
-                                    log::info!("Got response! {}", resp);
-                                } else {
-                                    log::info!("No response yet, try again later");
-                                    http_resp = Some(channel);
+                                match channel.try_recv() {
+                                    Ok(Some(resp)) => {
+                                        log::info!("Got response! {}", resp);
+                                    }
+                                    Ok(None) => {
+                                        log::info!("No response yet, try again later");
+                                        http_resp = Some(channel);
+                                    }
+                                    Err(e) => {
+                                        log::error!("Error reading from channel: {:?}", e);
+                                    }
                                 }
                             } else {
                                 log::error!("Haven't made an HTTP request yet, press space first");
                             }
                         } else if input.virtual_keycode == Some(winit::event::VirtualKeyCode::S) {
-                            // TODO This locks up the browser, it doesn't work
+                            // This locks up the browser, it doesn't work
                             let (tx, mut rx) = oneshot::channel::<String>();
-                            start_http_call("http://0.0.0.0:8000/huge_seattle.bin".to_string(), tx);
+                            start_http_call("/huge_seattle.bin".to_string(), tx);
                             log::info!("Made request, now spinlock and wait");
                             let mut cnt = 0;
                             loop {
@@ -153,11 +179,23 @@ pub fn main() {
                 _ => {}
             },
             Event::MainEventsCleared => {
-                // TODO window.request_redraw(); ? Or not needed on web?
+                window.request_redraw();
             }
             Event::RedrawRequested(_) => unsafe {
-                gl.clear(glow::COLOR_BUFFER_BIT);
-                gl.draw_arrays(glow::TRIANGLES, 0, 3);
+                // Add this around critical operations
+                let result = unsafe {
+                    // Wrap problematic operation in a closure
+                    (|| -> Result<(), String> {
+                        // Your existing code here
+                        gl.clear(glow::COLOR_BUFFER_BIT);
+                        gl.draw_arrays(glow::TRIANGLES, 0, 3);
+                        Ok(())
+                    })()
+                };
+
+                if let Err(err) = result {
+                    log::error!("WebGL operation failed: {}", err);
+                }
             },
             _ => {}
         }
@@ -193,12 +231,14 @@ fn start_http_call(url: String, tx: oneshot::Sender<String>) {
     });
 }
 
+// The original start function - kept minimal to avoid auto-initialization
 #[wasm_bindgen(start)]
 pub fn run() {
     console_log::init_with_level(log::Level::Debug).unwrap();
     std::panic::set_hook(Box::new(|info| {
-        log::error!("Panicked: {}", info);
+        // Use web_sys::console directly since logger might not be initialized
+        web_sys::console::error_1(&format!("Panicked: {}", info).into());
     }));
 
-    main();
+    // We don't call main() here anymore, as we'll initialize through the exported function
 }

@@ -1,27 +1,17 @@
 <script>
   import { onMount } from 'svelte';
-  
   let container;
   let loading = true;
   let error = null;
-  
+
   onMount(async () => {
     try {
       // Import the wasm module
-      const wasm = await import('../../pkg/wasm_games.js');
+      const wasm = await import('../../wasm-games/pkg/wasm_games.js');
       await wasm.default(); // Initialize the module
       
-      // The Rust code will create and append its canvas to the body
-      // We need to move it to our container
-      const canvas = document.querySelector('canvas');
-      if (canvas && canvas.parentNode === document.body) {
-        document.body.removeChild(canvas);
-        container.appendChild(canvas);
-        
-        // Optional: Set dimensions
-        canvas.style.width = '100%';
-        canvas.style.height = '100%';
-      }
+      // Pass the container element to the wasm module
+      wasm.initialize(container);
       
       loading = false;
     } catch (err) {
@@ -32,34 +22,23 @@
   });
 </script>
 
-<div class="webgl-container" bind:this={container}>
-  {#if loading}
-    <div class="loading">Loading WebGL demo...</div>
+<div class="game-container" bind:this={container}>
+  <!-- {#if loading}
+    <p>Loading WebGL demo...</p>
   {:else if error}
-    <div class="error">Error: {error}</div>
-  {/if}
+    <p class="error">Error: {error}</p>
+  {/if} -->
 </div>
 
 <style>
-  .webgl-container {
+  .game-container {
     width: 100%;
     height: 100%;
     position: relative;
-    background-color: #1a1a1a;
-    border-radius: 4px;
-    overflow: hidden;
-  }
-  
-  .loading, .error {
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    position: absolute;
-    inset: 0;
-    color: white;
+    border: 1px solid #ccc;
   }
   
   .error {
-    color: #ff6b6b;
+    color: red;
   }
 </style>
